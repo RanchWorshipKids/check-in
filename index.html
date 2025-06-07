@@ -79,12 +79,10 @@
   };
 
             // This is a check to see if the user has replaced the placeholder.
-            if (firebaseConfig.apiKey === "YOUR_API_KEY") {
-                 showMessage(document.getElementById('errorMessage'), "Firebase configuration is missing. Please add your project keys.", true);
-                 showLoading(false);
-                 authStatus.textContent = 'Config Missing!';
-                 return;
-            }
+  // Initialize Firebase
+  const app = initializeApp(firebaseConfig);
+  const analytics = getAnalytics(app);
+</script>
 
             try {
                 app = initializeApp(firebaseConfig);
