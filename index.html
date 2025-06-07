@@ -68,14 +68,15 @@
         async function initializeFirebase() {
             const authStatus = document.getElementById('authStatus');
             // This is the correct place for your actual Firebase config
-            const firebaseConfig = {
-              apiKey: "YOUR_API_KEY",
-              authDomain: "YOUR_AUTH_DOMAIN",
-              projectId: "YOUR_PROJECT_ID",
-              storageBucket: "YOUR_STORAGE_BUCKET",
-              messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
-              appId: "YOUR_APP_ID"
-            };
+  const firebaseConfig = {
+    apiKey: "AIzaSyCWS4XDbEtY3kDfpZUq4e88UHTi3yEAo1I",
+    authDomain: "ranch-worship-kids-check-in.firebaseapp.com",
+    projectId: "ranch-worship-kids-check-in",
+    storageBucket: "ranch-worship-kids-check-in.firebasestorage.app",
+    messagingSenderId: "303193752215",
+    appId: "1:303193752215:web:3213fff50e02515f009fd2",
+    measurementId: "G-JVMSMX3S0M"
+  };
 
             // This is a check to see if the user has replaced the placeholder.
             if (firebaseConfig.apiKey === "YOUR_API_KEY") {
