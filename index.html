@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ranch Worship Kids Check-in</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&display=swap" rel="stylesheet">
+    <script type="module">
+        // Firebase Imports
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { 
+            getAuth, 
+            signInAnonymously, 
+            signInWithCustomToken, 
+            onAuthStateChanged,
+            setPersistence,
+            inMemoryPersistence
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { 
+            getFirestore, 
+            collection, 
+            addDoc, 
+            doc, 
+            onSnapshot, 
+            updateDoc, 
+            query, 
+            where, 
+            getDocs,
+            serverTimestamp,
+            Timestamp 
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- App State ---
+        let app, db, auth, currentUserId = null;
+        let checkInsCollectionRef, familiesCollectionRef;
+        let unsubscribeChildren = null; 
+        let currentChildDataForModal = null;
+
+        // --- Helper Functions ---
+        function showLoading(show) { 
+            const loadingIndicator = document.getElementById('loadingIndicator');
+            if (loadingIndicator) loadingIndicator.classList.toggle('hidden', !show); 
+        }
+
+        function showMessage(element, message, isError = false) {
+            element.textContent = message;
+            element.classList.remove('hidden', 'text-green-600', 'text-red-600', 'bg-green-100', 'bg-red-100');
+            if (isError) element.classList.add('text-red-600', 'bg-red-100');
+            else element.classList.add('text-green-600', 'bg-green-100');
+            setTimeout(() => element.classList.add('hidden'), 5000);
+        }
+        
+        function generateTicketId() {
+            const prefix = String.fromCharCode(65 + Math.floor(Math.random() * 26)) + String.fromCharCode(65 + Math.floor(Math.random() * 26)) + String.fromCharCode(65 + Math.floor(Math.random() * 26));
+            const suffix = Math.floor(10000 + Math.random() * 90000);
+            return `${prefix}-${suffix}`;
+        }
+        
+        function switchView(viewToShow) {
+            const familySearchView = document.getElementById('familySearchView');
+            const returningFamilyView = document.getElementById('returningFamilyView');
+            const newFamilyView = document.getElementById('newFamilyView');
+            [familySearchView, returningFamilyView, newFamilyView].forEach(view => view.classList.add('hidden'));
+            if (viewToShow) viewToShow.classList.remove('hidden');
+        }
+
+        async function initializeFirebase() {
+            const authStatus = document.getElementById('authStatus');
+            const errorMessageDiv = document.getElementById('errorMessage');
+            
+            // --- This is the correct configuration logic for your environment ---
+            const firebaseConfigFromEnv = typeof __firebase_config !== 'undefined' ? __firebase_config : null;
+            const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+            
+            if (!firebaseConfigFromEnv) {
+                 showMessage(errorMessageDiv, "Firebase configuration is missing. Please ensure the app is running in the correct environment.", true);
+                 showLoading(false);
+                 authStatus.textContent = 'Config Missing!';
+                 return;
+            }
+
+            try {
+                const firebaseConfig = JSON.parse(firebaseConfigFromEnv);
+                const appId = firebaseConfig.appId;
+
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                await setPersistence(auth, inMemoryPersistence);
+                
+                checkInsCollectionRef = collection(db, `artifacts/${appId}/public/data/childrenCheckIns`);
+                familiesCollectionRef = collection(db, `artifacts/${appId}/public/data/families`);
+                authStatus.textContent = 'Authenticating...';
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        currentUserId = user.uid;
+                        authStatus.textContent = `Authenticated`;
+                        await loadCheckedInChildren(); 
+                    } else {
+                        showLoading(true); 
+                        if (initialAuthToken) {
+                            try { await signInWithCustomToken(auth, initialAuthToken); } catch (error) { await signInAnonymously(auth); }
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                    }
+                });
+            } catch (error) {
+                showMessage(errorMessageDiv, `Firebase initialization failed: ${error.message}`, true);
+                showLoading(false);
+            }
+        }
+        
+        async function loadCheckedInChildren() {
+            if (!currentUserId || !checkInsCollectionRef) return;
+            showLoading(true);
+            if (unsubscribeChildren) unsubscribeChildren();
+
+            const q = query(checkInsCollectionRef, where("status", "==", "checked-in"));
+            unsubscribeChildren = onSnapshot(q, (snapshot) => {
+                const checkedInChildrenList = document.getElementById('checkedInChildrenList');
+                checkedInChildrenList.innerHTML = ''; 
+                if (snapshot.empty) {
+                    checkedInChildrenList.innerHTML = '<p class="text-gray-500 col-span-full text-center">No children currently checked in.</p>';
+                } else {
+                    let children = snapshot.docs.map(docSnap => ({ id: docSnap.id, data: docSnap.data() }));
+                    children.sort((a, b) => (b.data.checkInTime?.toDate()?.getTime() || 0) - (a.data.checkInTime?.toDate()?.getTime() || 0));
+                    children.forEach(childDoc => renderCheckedInChildrenItem(childDoc.id, childDoc.data));
+                }
+                showLoading(false);
+            }, (error) => {
+                showMessage(document.getElementById('errorMessage'), `Error loading checked-in list: ${error.message}`, true);
+                showLoading(false);
+            });
+        }
+
+        function renderCheckedInChildrenItem(childId, childData) {
+            const checkedInChildrenList = document.getElementById('checkedInChildrenList');
+            const itemDiv = document.createElement('div');
+            itemDiv.className = 'bg-white p-4 rounded-lg shadow hover:shadow-md transition-shadow duration-200';
+            
+            itemDiv.innerHTML = `
+                <h3 class="text-lg font-semibold text-blue-600">${childData.childName}</h3>
+                <p class="text-sm text-gray-700">Parent: ${childData.parentName}</p>
+                <p class="text-sm text-gray-600">Ticket ID: <span class="font-bold text-indigo-600">${childData.ticketId}</span></p>
+                <div class="mt-3 flex space-x-2">
+                    <button data-action="print" data-child='${JSON.stringify(childData).replace(/'/g, "&apos;")}' class="print-ticket-btn text-xs bg-green-500 hover:bg-green-600 text-white font-medium py-2 px-3 rounded-md">Print Tickets</button>
+                    <button data-action="checkout" data-id="${childId}" data-name="${childData.childName}" class="checkout-btn text-xs bg-red-500 hover:bg-red-600 text-white font-medium py-2 px-3 rounded-md">Check Out</button>
+                </div>`;
+            checkedInChildrenList.appendChild(itemDiv);
+        }
+        
+        async function checkoutChild(childId, childName) {
+            if (!currentUserId) return;
+            showLoading(true);
+            try {
+                const childDocRef = doc(db, `artifacts/${app.options.appId}/public/data/childrenCheckIns`, childId);
+                await updateDoc(childDocRef, { status: 'checked-out', checkOutTime: serverTimestamp() });
+                showMessage(document.getElementById('successMessage'), `${childName} checked out successfully.`);
+            } catch (error) {
+                showMessage(document.getElementById('errorMessage'), `Error checking out: ${error.message}`, true);
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        function displayTicketModal(childData) {
+            currentChildDataForModal = childData;
+            const ticketModal = document.getElementById('ticketModal');
+            const ticketContent = document.getElementById('ticketContent');
+
+            let checkInTimeDisplay = 'N/A';
+            if (childData.checkInTime) {
+                const dateObj = childData.checkInTime.toDate ? childData.checkInTime.toDate() : childData.checkInTime;
+                if (dateObj instanceof Date) {
+                   checkInTimeDisplay = dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ' ' + dateObj.toLocaleDateString();
+                }
+            }
+
+            ticketContent.innerHTML = `
+                <div class="printable-ticket-area space-y-4"> 
+                    <div class="child-ticket p-5 border-2 border-dashed border-gray-400 rounded-lg bg-slate-50">
+                        <h2 class="text-xl font-bold text-center text-blue-700 mb-3">Ranch Worship Kids - Child Tag</h2>
+                        <div class="grid grid-cols-2 gap-x-3 gap-y-1 mb-3 text-xs sm:text-sm">
+                            <div><strong>Child:</strong></div><div class="font-semibold">${childData.childName || 'N/A'}</div>
+                            <div><strong>Grade:</strong></div><div>${childData.gradeLevel || 'N/A'}</div>
+                            <div><strong>Parent:</strong></div><div>${childData.parentName || 'N/A'}</div>
+                            <div><strong>Contact:</strong></div><div>${childData.parentContact || 'N/A'}</div>
+                            <div><strong>Allergies:</strong></div><div class="break-words">${childData.allergies || 'None'}</div>
+                            <div><strong>Checked In:</strong></div><div>${checkInTimeDisplay}</div>
+                        </div>
+                        <div class="mt-4 text-center">
+                            <p class="text-xs text-gray-700">TICKET ID</p>
+                            <p class="text-3xl sm:text-4xl font-mono font-extrabold text-indigo-700 tracking-wider py-1 px-2 border-2 border-indigo-500 rounded-md inline-block">${childData.ticketId || 'N/A'}</p>
+                        </div>
+                    </div>
+                    <div class="claim-stub p-5 border-2 border-dashed border-gray-400 rounded-lg bg-slate-50">
+                        <h2 class="text-xl font-bold text-center text-blue-700 mb-3">Ranch Worship Kids - Parent Claim Stub</h2>
+                         <p class="text-center text-sm mb-4">Present this stub for child pick-up.</p>
+                        <div class="text-center">
+                             <p class="text-sm">Child's Name:</p>
+                             <p class="text-xl font-bold mb-4">${childData.childName || 'N/A'}</p>
+                             <p class="text-xs text-gray-700">MATCHING TICKET ID</p>
+                            <p class="text-3xl sm:text-4xl font-mono font-extrabold text-indigo-700 tracking-wider py-1 px-2 border-2 border-indigo-500 rounded-md inline-block">${childData.ticketId || 'N/A'}</p>
+                        </div>
+                    </div>
+                </div>
+            `;
+            ticketModal.classList.remove('hidden');
+        }
+
+        // --- All event listeners are now safely inside DOMContentLoaded ---
+        document.addEventListener('DOMContentLoaded', () => {
+            // --- UI Element Declarations ---
+            const familySearchView = document.getElementById('familySearchView');
+            const returningFamilyView = document.getElementById('returningFamilyView');
+            const newFamilyView = document.getElementById('newFamilyView');
+            const familySearchForm = document.getElementById('familySearchForm');
+            const searchContactInput = document.getElementById('searchContact');
+            const returningFamilyInfo = document.getElementById('returningFamilyInfo');
+            const returningChildrenList = document.getElementById('returningChildrenList');
+            const checkinReturningForm = document.getElementById('checkinReturningForm');
+            const newFamilyForm = document.getElementById('newFamilyForm');
+            const newParentNameInput = document.getElementById('newParentName');
+            const newParentContactInput = document.getElementById('newParentContact');
+            const newChildrenContainer = document.getElementById('newChildrenContainer');
+            const addChildButton = document.getElementById('addChildButton');
+            const checkedInChildrenList = document.getElementById('checkedInChildrenList');
+            const ticketModal = document.getElementById('ticketModal');
+            const closeTicketModalButton = document.getElementById('closeTicketModalButton');
+            const printTicketButton = document.getElementById('printActualTicketButton');
+            const errorMessageDiv = document.getElementById('errorMessage');
+            const successMessageDiv = document.getElementById('successMessage');
+            const showNewFamilyFormButton = document.getElementById('showNewFamilyFormButton');
+            const backToSearchButton = document.getElementById('backToSearchButton');
+            const backToSearchButtonFromReturning = document.getElementById('backToSearchButtonFromReturning');
+            
+            // --- Event Listener Setup ---
+
+            // Family Search
+            familySearchForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const contact = searchContactInput.value.trim();
+                if (!contact) {
+                    showMessage(errorMessageDiv, "Please enter a phone number to search.", true);
+                    return;
+                }
+                showLoading(true);
+
+                const q = query(familiesCollectionRef, where("parentContact", "==", contact));
+                const querySnapshot = await getDocs(q);
+                
+                showLoading(false);
+                if (querySnapshot.empty) {
+                    showMessage(errorMessageDiv, "Family not found. Please register as a new family.", true);
+                    newParentContactInput.value = contact;
+                    switchView(newFamilyView);
+                } else {
+                    const familyDoc = querySnapshot.docs[0];
+                    returningFamilyInfo.innerHTML = `<p><strong>Parent:</strong> ${familyDoc.data().parentName}</p><p><strong>Contact:</strong> ${familyDoc.data().parentContact}</p>`;
+                    returningChildrenList.innerHTML = '';
+                    familyDoc.data().children.forEach((child, index) => {
+                        const childId = `child-${familyDoc.id}-${index}`;
+                        const li = document.createElement('li');
+                        li.className = 'flex items-center justify-between bg-gray-50 p-3 rounded-md';
+                        li.innerHTML = `<div><label for="${childId}" class="font-medium text-gray-800">${child.childName}</label><p class="text-xs text-gray-500">Grade: ${child.gradeLevel || 'N/A'}</p><p class="text-xs text-gray-500">Allergies: ${child.allergies || 'None'}</p></div><input type="checkbox" id="${childId}" name="children" value='${JSON.stringify(child)}' class="h-6 w-6 text-blue-600 border-gray-300 rounded focus:ring-blue-500">`;
+                        returningChildrenList.appendChild(li);
+                    });
+                    checkinReturningForm.dataset.familyData = JSON.stringify(familyDoc.data());
+                    switchView(returningFamilyView);
+                }
+            });
+
+            // Returning Family Check-in
+            checkinReturningForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const checkedBoxes = checkinReturningForm.querySelectorAll('input[name="children"]:checked');
+                if (checkedBoxes.length === 0) {
+                    showMessage(errorMessageDiv, "Please select at least one child to check in.", true);
+                    return;
+                }
+                showLoading(true);
+                const familyData = JSON.parse(checkinReturningForm.dataset.familyData);
+                const promises = [];
+                const checkInTime = new Date();
+
+                checkedBoxes.forEach(box => {
+                    const childData = JSON.parse(box.value);
+                    const ticketId = generateTicketId();
+                    const checkInDataForDb = { ...childData, parentName: familyData.parentName, parentContact: familyData.parentContact, ticketId, status: 'checked-in', checkInTime: serverTimestamp(), checkOutTime: null, checkedInBy: currentUserId };
+                    promises.push(addDoc(checkInsCollectionRef, checkInDataForDb));
+                    const checkInDataForModal = { ...checkInDataForDb, checkInTime };
+                    displayTicketModal(checkInDataForModal);
+                });
+                
+                await Promise.all(promises);
+                showLoading(false);
+                showMessage(successMessageDiv, `${checkedBoxes.length} children checked in successfully!`);
+                switchView(familySearchView);
+                familySearchForm.reset();
+            });
+
+            // New Family Registration
+            addChildButton.addEventListener('click', () => {
+                const childDiv = document.createElement('div');
+                childDiv.className = 'child-entry-form border-t pt-4 mt-4 space-y-4'; 
+                childDiv.innerHTML = `<div><label class="block text-sm font-medium text-gray-700">Child's Name</label><input type="text" name="newChildName" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"></div><div><label class="block text-sm font-medium text-gray-700">Grade Level</label><input type="text" name="newChildGrade" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm" placeholder="e.g., 1st, Pre-K"></div><div><label class="block text-sm font-medium text-gray-700">Allergies/Notes</label><input type="text" name="newChildAllergies" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm" placeholder="None"></div>`;
+                newChildrenContainer.appendChild(childDiv);
+            });
+            
+            newFamilyForm.addEventListener('submit', async(e) => {
+                e.preventDefault();
+                showLoading(true);
+                const parentName = newParentNameInput.value.trim();
+                const parentContact = newParentContactInput.value.trim();
+                const childrenNodes = newChildrenContainer.querySelectorAll('.child-entry-form');
+                const children = [];
+                childrenNodes.forEach(node => {
+                    const childName = node.querySelector('input[name="newChildName"]').value.trim();
+                    const gradeLevel = node.querySelector('input[name="newChildGrade"]').value.trim() || 'N/A';
+                    const allergies = node.querySelector('input[name="newChildAllergies"]').value.trim() || 'None';
+                    if (childName) children.push({ childName, gradeLevel, allergies });
+                });
+
+                if (!parentName || !parentContact || children.length === 0) {
+                    showMessage(errorMessageDiv, "Parent info and at least one child are required.", true);
+                    showLoading(false);
+                    return;
+                }
+
+                const familyData = { parentName, parentContact, children };
+                await addDoc(familiesCollectionRef, familyData);
+                
+                const promises = [];
+                const checkInTime = new Date();
+                children.forEach(child => {
+                    const ticketId = generateTicketId();
+                    const checkInDataForDb = { ...child, parentName, parentContact, ticketId, status: 'checked-in', checkInTime: serverTimestamp(), checkOutTime: null, checkedInBy: currentUserId };
+                    promises.push(addDoc(checkInsCollectionRef, checkInDataForDb));
+                    const checkInDataForModal = { ...checkInDataForDb, checkInTime };
+                    displayTicketModal(checkInDataForModal);
+                });
+                
+                await Promise.all(promises);
+                showLoading(false);
+                showMessage(successMessageDiv, `Family for ${parentName} registered and ${children.length} children checked in!`);
+                switchView(familySearchView);
+                newFamilyForm.reset();
+                newChildrenContainer.innerHTML = '';
+                addChildButton.click();
+            });
+            
+            // Checked-in list interactions
+            checkedInChildrenList.addEventListener('click', async (e) => {
+                const target = e.target.closest('button');
+                if (!target) return;
+                const action = target.dataset.action;
+                
+                if (action === 'print') {
+                    try {
+                        const childData = JSON.parse(target.dataset.child.replace(/&apos;/g, "'"));
+                        if (childData.checkInTime && typeof childData.checkInTime.seconds === 'number') childData.checkInTime = new Timestamp(childData.checkInTime.seconds, childData.checkInTime.nanoseconds).toDate();
+                        else if (!childData.checkInTime) childData.checkInTime = new Date();
+                        displayTicketModal(childData);
+                    } catch (err) { /* silent fail */ }
+                } else if (action === 'checkout') {
+                    const childId = target.dataset.id;
+                    const childName = target.dataset.name;
+                    const confirmModal = document.getElementById('customConfirmModal');
+                    document.getElementById('customConfirmMessage').textContent = `Are you sure you want to check out ${childName}?`;
+                    confirmModal.classList.remove('hidden');
+                    document.getElementById('customConfirmYes').onclick = async () => {
+                        confirmModal.classList.add('hidden');
+                        await checkoutChild(childId, childName);
+                    };
+                    document.getElementById('customConfirmNo').onclick = () => confirmModal.classList.add('hidden');
+                }
+            });
+            
+            // Modal printing and closing
+            printTicketButton.addEventListener('click', () => {
+                if (!currentChildDataForModal) { return; }
+                const printWindow = window.open('', '_blank');
+                printWindow.document.write('<html><head><title>Print Ranch Worship Kids Tickets</title>');
+                printWindow.document.write(`<style>@page { size: 2.4in 8in; margin: 0; } body { margin: 0; font-family: 'Inter', sans-serif; -webkit-print-color-adjust: exact; print-color-adjust: exact; } .printable-ticket-area { width: 2.4in; height: 8in; display: flex; flex-direction: column; } .child-ticket, .claim-stub { width: 100%; height: 4in; box-sizing: border-box; padding: 0.2in; display: flex; flex-direction: column; align-items: center; text-align: center; border-bottom: 2px dashed #000; page-break-inside: avoid; } .child-ticket h2, .claim-stub h2 { font-size: 14pt; font-weight: 700; color: #000 !important; margin: 0 0 0.2in 0; } .child-ticket .grid { display: grid; grid-template-columns: auto 1fr; gap: 2pt 8pt; font-size: 10pt; text-align: left; margin-bottom: auto; } .child-ticket .grid strong { font-weight: 600; } .claim-stub { justify-content: center; } .claim-stub .child-name-label { font-size: 12pt; margin: 0; } .claim-stub .child-name { font-size: 18pt; font-weight: 700; margin: 0 0 0.3in 0; } .ticket-id-label { font-size: 9pt; font-weight: 600; margin: 0; } .ticket-id-value { font-family: monospace; font-size: 36pt; font-weight: 900; color: #000 !important; letter-spacing: 2pt; padding: 0.1in; border: 3px solid #000 !important; border-radius: 8px; margin: 2pt 0 0 0; }</style>`);
+                printWindow.document.write('</head><body>');
+                const childData = currentChildDataForModal;
+                let checkInTimeDisplay = 'N/A';
+                if (childData.checkInTime) {
+                    const dateObj = childData.checkInTime.toDate ? childData.checkInTime.toDate() : childData.checkInTime;
+                    if (dateObj instanceof Date) { checkInTimeDisplay = dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ' ' + dateObj.toLocaleDateString(); }
+                }
+                const printHtml = `<div class="printable-ticket-area"><div class="child-ticket"><h2>Ranch Worship Kids - Child Tag</h2><div class="grid"><strong>Child:</strong><span>${childData.childName}</span><strong>Grade:</strong><span>${childData.gradeLevel || 'N/A'}</span><strong>Parent:</strong><span>${childData.parentName}</span><strong>Contact:</strong><span>${childData.parentContact}</span><strong>Allergies:</strong><span>${childData.allergies}</span><strong>Checked In:</strong><span>${checkInTimeDisplay}</span></div><div class="ticket-id-container"><p class="ticket-id-label">TICKET ID</p><p class="ticket-id-value">${childData.ticketId}</p></div></div><div class="claim-stub"><h2>Ranch Worship Kids - Parent Claim Stub</h2><p class="child-name-label">Child's Name</p><p class="child-name">${childData.childName}</p><div class="ticket-id-container"><p class="ticket-id-label">MATCHING ID</p><p class="ticket-id-value">${childData.ticketId}</p></div></div></div>`;
+                printWindow.document.write(printHtml);
+                printWindow.document.write('</body></html>');
+                printWindow.document.close();
+                printWindow.focus(); 
+                setTimeout(() => { printWindow.print(); printWindow.close(); }, 350); 
+            });
+
+            closeTicketModalButton.addEventListener('click', () => {
+                ticketModal.classList.add('hidden');
+                currentChildDataForModal = null;
+            });
+
+            // View Switching
+            showNewFamilyFormButton.addEventListener('click', () => {
+                 switchView(newFamilyView);
+                 newFamilyForm.reset();
+                 newChildrenContainer.innerHTML = '';
+                 addChildButton.click();
+            });
+            backToSearchButton.addEventListener('click', () => switchView(familySearchView));
+            backToSearchButtonFromReturning.addEventListener('click', () => switchView(familySearchView));
+            
+            // Initial App State
+            showLoading(true); 
+            initializeFirebase();
+            addChildButton.click();
+        });
+
+    </script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .modal-overlay { background-color: rgba(0,0,0,0.5); }
+    </style>
+</head>
+<body class="bg-slate-100 text-gray-800 min-h-screen flex flex-col">
+
+    <header class="bg-blue-800 text-white p-4 shadow-md">
+        <div class="container mx-auto flex justify-between items-center">
+            <div class="flex items-center">
+                <!-- Cross Icon -->
+                <svg class="h-7 w-7 mr-3" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" xmlns="http://www.w3.org/2000/svg">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15M4.5 9h15" />
+                </svg>
+                <h1 class="text-2xl font-bold">Ranch Worship Kids Check-in</h1>
+            </div>
+            <div id="authStatus" class="text-xs">Initializing...</div>
+        </div>
+    </header>
+
+    <div id="loadingIndicator" class="hidden fixed inset-0 bg-gray-800 bg-opacity-50 flex items-center justify-center z-[100]">
+        <div class="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-blue-500"></div>
+    </div>
+    
+    <div id="errorMessage" class="hidden p-3 rounded-md text-sm text-center fixed top-20 left-1/2 -translate-x-1/2 w-auto max-w-md z-[90]"></div>
+    <div id="successMessage" class="hidden p-3 rounded-md text-sm text-center fixed top-20 left-1/2 -translate-x-1/2 w-auto max-w-md z-[90]"></div>
+
+    <main class="container mx-auto p-4 flex-grow mt-8">
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+            <!-- Left Column: Dynamic Check-in Flow -->
+            <section id="checkinFlow" class="md:col-span-1 bg-white p-6 rounded-xl shadow-lg">
+                <!-- View 1: Family Search -->
+                <div id="familySearchView">
+                    <h2 class="text-xl font-semibold mb-4 text-blue-700 border-b pb-2">Family Check-in</h2>
+                    <form id="familySearchForm" class="space-y-4">
+                        <div>
+                            <label for="searchContact" class="block text-sm font-medium text-gray-700">Search by Parent Phone #</label>
+                            <input type="tel" id="searchContact" name="searchContact" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm" placeholder="e.g., 555-123-4567">
+                        </div>
+                        <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-md">Search</button>
+                    </form>
+                    <div class="mt-6 text-center">
+                        <p class="text-sm text-gray-600">First time here?</p>
+                        <button id="showNewFamilyFormButton" class="mt-1 text-indigo-600 hover:text-indigo-800 font-semibold">Register a New Family</button>
+                    </div>
+                </div>
+
+                <!-- View 2: Returning Family Check-in -->
+                <div id="returningFamilyView" class="hidden">
+                    <h2 class="text-xl font-semibold mb-4 text-blue-700 border-b pb-2">Welcome Back!</h2>
+                    <div id="returningFamilyInfo" class="mb-4 p-3 bg-blue-50 rounded-lg"></div>
+                    <form id="checkinReturningForm">
+                        <p class="mb-2 font-medium text-gray-700">Select children to check in:</p>
+                        <ul id="returningChildrenList" class="space-y-2 mb-6"></ul>
+                        <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-md">Check In & Print Tags</button>
+                    </form>
+                     <button id="backToSearchButtonFromReturning" class="mt-4 w-full text-center text-sm text-gray-600 hover:text-gray-800">Back to Search</button>
+                </div>
+                
+                <!-- View 3: New Family Registration -->
+                <div id="newFamilyView" class="hidden">
+                     <h2 class="text-xl font-semibold mb-4 text-blue-700 border-b pb-2">New Family Registration</h2>
+                     <form id="newFamilyForm" class="space-y-6">
+                        <div>
+                             <h3 class="text-lg font-medium text-gray-800">Parent Info</h3>
+                            <div class="mt-4">
+                                <label for="newParentName" class="block text-sm font-medium text-gray-700">Parent/Guardian Name</label>
+                                <input type="text" id="newParentName" name="newParentName" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                            </div>
+                            <div class="mt-4">
+                                <label for="newParentContact" class="block text-sm font-medium text-gray-700">Parent Contact (Phone)</label>
+                                <input type="tel" id="newParentContact" name="newParentContact" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                            </div>
+                        </div>
+                        <div>
+                            <h3 class="text-lg font-medium text-gray-800">Children</h3>
+                            <div id="newChildrenContainer" class="space-y-4">
+                                <!-- Children fields will be added here dynamically -->
+                            </div>
+                            <button type="button" id="addChildButton" class="mt-4 text-sm font-semibold text-indigo-600 hover:text-indigo-800">+ Add Another Child</button>
+                        </div>
+                        <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-md">Save Family & Check In</button>
+                     </form>
+                     <button id="backToSearchButton" class="mt-4 w-full text-center text-sm text-gray-600 hover:text-gray-800">Back to Search</button>
+                </div>
+            </section>
+
+            <!-- Right Column: Currently Checked In -->
+            <section class="md:col-span-2 bg-white p-6 rounded-xl shadow-lg">
+                <h2 class="text-xl font-semibold mb-6 text-blue-700 border-b pb-2">Currently Checked-in</h2>
+                <div id="checkedInChildrenList" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 gap-4">
+                     <p class="text-gray-500 col-span-full text-center">Loading children...</p>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- Ticket Modal -->
+    <div id="ticketModal" class="hidden fixed inset-0 z-40 overflow-y-auto">
+        <div class="flex items-center justify-center min-h-screen px-4 py-4 text-center sm:block sm:p-0">
+            <div class="fixed inset-0 transition-opacity modal-overlay" aria-hidden="true"></div>
+            <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
+            <div class="inline-block align-bottom bg-white rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full modal-content">
+                <div class="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
+                    <h3 class="text-lg leading-6 font-medium text-gray-900 text-center mb-4">Print Preview</h3>
+                    <div id="ticketContent" class="printable-ticket-container"></div>
+                </div>
+                <div class="bg-gray-50 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
+                    <button type="button" id="printActualTicketButton" class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-green-600 text-base font-medium text-white hover:bg-green-700 sm:ml-3 sm:w-auto sm:text-sm">Print Tickets</button>
+                    <button type="button" id="closeTicketModalButton" class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <footer class="text-center text-sm text-gray-500 py-4 border-t border-gray-200 bg-white">
+        Ranch Worship Kids Check-in System &copy; <span id="currentYear"></span>.
+        <script>document.getElementById('currentYear').textContent = new Date().getFullYear();</script>
+    </footer>
+
+</body>
+</html>
